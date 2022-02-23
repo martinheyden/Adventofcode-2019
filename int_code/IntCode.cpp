@@ -15,22 +15,29 @@
  */
 std::queue<long> IntCode::runProgram(std::queue<long> inputQueue)
 {
-    //long NBR_INSTRUCTIONS[8] = {4,4,2,2,3,3,4,4}; 
     needInput = false;
     inputs = inputQueue;
     output = std::queue<long>();
-    while (currentRegister < programVector.size() && not programDone) {
+    while (not checkForTermination()) {
         hasJumpedThisInstruction = false;
         parseInstructionAtCurrentRegister();
         executeInstruction();
-        if (needInput) {
-            return output;
-        }   
-        if (programVector[currentRegister] == instruction && !hasJumpedThisInstruction && optCode != OptCode::Exit) { //Instruction unchanged
-            currentRegister += NBR_INSTRUCTIONS[optCode-1];
-        }
+        updateCurrentRegistry();
     }
     return output;
+}
+
+bool IntCode::checkForTermination()
+{
+    return needInput || programDone || currentRegister >=programVector.size();
+}
+
+void IntCode::updateCurrentRegistry()
+{
+    // Current registry unchanged, has not jumped, and will not terminate due to needing input.
+    if (programVector[currentRegister] == instruction && !hasJumpedThisInstruction && optCode != OptCode::Exit && not needInput) { //Instruction unchanged
+        currentRegister += NBR_INSTRUCTIONS[optCode-1];
+    }
 }
 
 bool IntCode::hasTerminated()
@@ -71,14 +78,16 @@ void IntCode::setOptCode(long instruction) {
         case 8:
             optCode = OptCode::Equal;
             break;
+        case 9:
+            optCode = OptCode::AdjustRelative;
+            break;
         case 99:
             optCode = OptCode::Exit;
-            //output = LONG_MAX;
             break;
         default:
             std::cout << "Invalid Optcode " << (instruction%100) << std::endl;
+            exit(1);
     }
-    
 }
 
 void IntCode::setParameterMode(long instruction)
@@ -87,13 +96,15 @@ void IntCode::setParameterMode(long instruction)
     //Might read more modes than necessary, but this is not a problem
     for (int p =0 ; p<3;++p) {
         factor *= 10;
-        if ((instruction%(factor*10))/factor == 1) {
+        int digit = (instruction%(factor*10))/factor;
+        if ( digit == 1) {
             parameterMode[p] = ParameterMode::Immediate;
+        } else if (digit ==2) {
+            parameterMode[p] = ParameterMode::Relative;
         } else {
             parameterMode[p] = ParameterMode::Position;
         }
     }
-
 }
 
 void IntCode::executeInstruction()
@@ -101,49 +112,50 @@ void IntCode::executeInstruction()
     long i = currentRegister;
     switch (optCode) {
         case OptCode::Add: 
-            programVector[programVector[i+3]] =  //Always one mode???
-                getValue(parameterMode[0],programVector[i+1]) + getValue(parameterMode[1],programVector[i+2]);
+            getWriteLocationReference(3) = getValueOfArgument(1) + getValueOfArgument(2);
             break;
         case OptCode::Multiply: 
-            programVector[programVector[i+3]] = 
-                getValue(parameterMode[0],programVector[i+1]) * getValue(parameterMode[1],programVector[i+2]);
+            getWriteLocationReference(3) = getValueOfArgument(1) * getValueOfArgument(2);
             break;
         case OptCode::Input: 
             if (inputs.size()!=0) {
-                programVector[programVector[i+1]] = inputs.front(); //Can only be in one parameterMode??
+                getWriteLocationReference(1) = inputs.front();
                 inputs.pop();
             } else {
                 needInput = true;
             }
             break;
         case OptCode::Output: 
-            output.push(getValue(parameterMode[0],programVector[i+1]));
+            output.push(getValueOfArgument(1));
             break;
         case OptCode::JumpIfTrue: 
-            if (getValue(parameterMode[0],programVector[i+1])!=0) {
-                currentRegister = getValue(parameterMode[1],programVector[i+2]);
+            if (getValueOfArgument(1)!=0) {
+                currentRegister = getValueOfArgument(2);
                 hasJumpedThisInstruction = true;
             } 
             break;
         case OptCode::JumpIfFalse: 
-            if (getValue(parameterMode[0],programVector[i+1])==0) {
-                currentRegister = getValue(parameterMode[1],programVector[i+2]);
+            if (getValueOfArgument(1)==0) {
+                currentRegister = getValueOfArgument(2);
                 hasJumpedThisInstruction = true;
             }
             break;
         case OptCode::LessThan: 
-            if (getValue(parameterMode[0],programVector[i+1])<getValue(parameterMode[1],programVector[i+2])) {
-                programVector[programVector[i+3]] = 1;
+            if (getValueOfArgument(1)<getValueOfArgument(2)) {
+                getWriteLocationReference(3) = 1;
             } else {
-                programVector[programVector[i+3]] = 0;
+                getWriteLocationReference(3) = 0;
             }
             break;
         case OptCode::Equal: 
-            if (getValue(parameterMode[0],programVector[i+1])==getValue(parameterMode[1],programVector[i+2])) {
-                programVector[programVector[i+3]] = 1;
+            if (getValueOfArgument(1)==getValueOfArgument(2)) {
+                getWriteLocationReference(3) = 1;
             } else {
-                programVector[programVector[i+3]] = 0;
+                getWriteLocationReference(3) = 0;
             }
+            break;
+        case OptCode::AdjustRelative:
+            relativeBase += getValueOfArgument(1);
             break;
         case OptCode::Exit:
             programDone = true;
@@ -160,8 +172,7 @@ void IntCode::readProgramFromString(std::string input)
     size_t len = 0;
     while (begin+len != end) {
         if (input[begin+len] == ',') {
-
-            programVector.push_back(stoi(input.substr(begin,len)));
+            programVector.push_back(stol(input.substr(begin,len)));
             begin = begin+len+1;
             len = 0;
         } else {
@@ -171,20 +182,57 @@ void IntCode::readProgramFromString(std::string input)
     //Last number
     programVector.push_back(stoi(input.substr(begin,len)));
     currentRegister = 0;
+    relativeBase = 0;
     programDone = false;
+    extendedMemory = {};
 }
 
-long IntCode::getValue(ParameterMode parameterMode, long input)
+long& IntCode::getWriteLocationReference(int offset)
 {
-    switch (parameterMode) {
+    long instrValue = programVector[currentRegister + offset];
+    if (parameterMode[offset-1] == ParameterMode::Position) {
+        return getMemoryReference(instrValue);
+    } else if (parameterMode[offset-1] = ParameterMode::Relative) {
+        return getMemoryReference(instrValue + relativeBase);
+    } else {
+        std::cout << "Error in getWriteLocation" << std::endl;
+        exit(1);
+    }
+}
+
+long IntCode::getValueOfArgument(int offset)
+{
+    int registryValue = programVector[currentRegister + offset];
+    switch (parameterMode[offset-1]) {
         case ParameterMode::Immediate:
-            return input;
+            return registryValue;
             break;
         case ParameterMode::Position:
-            return this->programVector[input];
+            return getMemoryValue(registryValue);
+            break;
+        case ParameterMode::Relative:
+            return getMemoryValue(registryValue + relativeBase);
             break;
         default:
            std::cout << "invalid mode" <<std::endl;
             return -1;
     }
+}
+
+long& IntCode::getMemoryReference(long p)
+{
+    if (p < 0) {
+        std::cout << "Trying to read from negative memory" << std::endl;
+        exit(1);
+    } else if (p < programVector.size()) {
+        return programVector[p];
+    } else {
+        extendedMemory.insert({p,0}); //Only inserts if not allready in map
+        return extendedMemory[p];
+    }
+}
+
+long IntCode::getMemoryValue(long p)
+{
+    return getMemoryReference(p);
 }

@@ -74,7 +74,6 @@ void run_init(vector<long> &vec, long &highest, string &input_data)
             IntCode &intCode = computers[i];
             output = intCode.runProgram(inputs);
             if (i == 4 && intCode.hasTerminated()) {
-           //     std::cout << "Terminating due to 4 has terminated" << std::endl;
                 if (output.back()>highest) {
                     highest = output.back();
                 }
